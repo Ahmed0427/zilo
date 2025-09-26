@@ -9,17 +9,15 @@
 
 #define CTRL_KEY(c) (c & 0x1F)
 
+#define ABUF_INIT {NULL, 0}
+
+#define ESC_CLEAR_LINE "\x1b[K"
+#define ESC_CURSOR_HIDE "\x1b[?25l"
+#define ESC_CURSOR_SHOW "\x1b[?25h"
 #define ESC_CLEAR_SCREEN "\x1b[2J"
 #define ESC_CURSOR_HOME "\x1b[H"
 #define ESC_MOVE_BOTTOM_RIGHT "\x1b[999C\x1b[999B"
 #define ESC_CURSOR_POS_REQ "\x1b[6n"
-
-struct editor_config_t {
-    int term_rows, term_cols;
-    struct termios orig_term;
-};
-
-struct editor_config_t e_config;
 
 void esc_cursor_home() {
     write(STDOUT_FILENO, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
@@ -35,6 +33,30 @@ void die(const char *s) {
     perror(s);
     exit(1);
 }
+
+struct editor_config_t {
+    int term_rows, term_cols;
+    struct termios orig_term;
+};
+
+struct editor_config_t e_config;
+
+struct abuf_t {
+    char *buf;
+    int size;
+};
+
+void ab_append(struct abuf_t *ab, char *buf, int size) {
+    char *new_buf = realloc(ab->buf, ab->size + size);
+    if (new_buf == NULL)
+        die("ab_append realloc");
+
+    memcpy(new_buf + ab->size, buf, size);
+    ab->buf = new_buf;
+    ab->size += size;
+}
+
+void ab_free(struct abuf_t *ab) { free(ab->buf); }
 
 void disenable_raw_mode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &e_config.orig_term) == -1) {
@@ -61,17 +83,6 @@ void enable_raw_mode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &term) == -1) {
         die("tcsetattr");
     }
-}
-
-char editor_read_keypress() {
-    char c = 0;
-    ssize_t n = 0;
-    while ((n = read(STDIN_FILENO, &c, 1)) != 1) {
-        if (n == -1 && errno != EAGAIN) {
-            die("read");
-        }
-    }
-    return c;
 }
 
 int get_term_size(int *rows, int *cols) {
@@ -109,20 +120,38 @@ int get_term_size(int *rows, int *cols) {
     return 0;
 }
 
-void editor_draw_rows() {
+void editor_draw_rows(struct abuf_t *ab) {
     for (int i = 0; i < e_config.term_rows; i++) {
-        write(STDOUT_FILENO, "~", 1);
+        ab_append(ab, "~", 1);
+        ab_append(ab, ESC_CLEAR_LINE, strlen(ESC_CLEAR_LINE));
         if (i != e_config.term_rows - 1) {
-            write(STDOUT_FILENO, "\r\n", 2);
+            ab_append(ab, "\r\n", 2);
         }
     }
 }
 
 void editor_reset_screen() {
-    esc_clear_screen();
-    esc_cursor_home();
-    editor_draw_rows();
-    esc_cursor_home();
+    struct abuf_t ab = ABUF_INIT;
+
+    ab_append(&ab, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
+    ab_append(&ab, ESC_CURSOR_HIDE, strlen(ESC_CURSOR_HIDE));
+    editor_draw_rows(&ab);
+    ab_append(&ab, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
+    ab_append(&ab, ESC_CURSOR_SHOW, strlen(ESC_CURSOR_SHOW));
+
+    write(STDOUT_FILENO, ab.buf, ab.size);
+    ab_free(&ab);
+}
+
+char editor_read_keypress() {
+    char c = 0;
+    ssize_t n = 0;
+    while ((n = read(STDIN_FILENO, &c, 1)) != 1) {
+        if (n == -1 && errno != EAGAIN) {
+            die("read");
+        }
+    }
+    return c;
 }
 
 void editor_process_keypress() {
