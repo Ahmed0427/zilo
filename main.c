@@ -19,6 +19,8 @@
 #define ESC_MOVE_BOTTOM_RIGHT "\x1b[999C\x1b[999B"
 #define ESC_CURSOR_POS_REQ "\x1b[6n"
 
+enum editorKey { ARROW_LEFT = 1000, ARROW_RIGHT, ARROW_UP, ARROW_DOWN };
+
 void esc_cursor_home() {
     write(STDOUT_FILENO, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
 }
@@ -35,6 +37,7 @@ void die(const char *s) {
 }
 
 struct editor_config_t {
+    int cursor_x, cursor_y;
     int term_rows, term_cols;
     struct termios orig_term;
 };
@@ -136,14 +139,19 @@ void editor_reset_screen() {
     ab_append(&ab, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
     ab_append(&ab, ESC_CURSOR_HIDE, strlen(ESC_CURSOR_HIDE));
     editor_draw_rows(&ab);
-    ab_append(&ab, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
+
+    char buf[32] = {0};
+    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", e_config.cursor_y + 1,
+             e_config.cursor_x + 1);
+    ab_append(&ab, buf, strlen(buf));
+
     ab_append(&ab, ESC_CURSOR_SHOW, strlen(ESC_CURSOR_SHOW));
 
     write(STDOUT_FILENO, ab.buf, ab.size);
     ab_free(&ab);
 }
 
-char editor_read_keypress() {
+int editor_read_keypress() {
     char c = 0;
     ssize_t n = 0;
     while ((n = read(STDIN_FILENO, &c, 1)) != 1) {
@@ -151,22 +159,78 @@ char editor_read_keypress() {
             die("read");
         }
     }
+
+    if (c == '\x1B') {
+        char seq[3] = {0};
+
+        if (read(STDIN_FILENO, &seq[0], 1) != 1)
+            return c;
+        if (read(STDIN_FILENO, &seq[1], 1) != 1)
+            return c;
+
+        if (seq[0] == '[') {
+            switch (seq[1]) {
+            case 'A':
+                return ARROW_UP;
+            case 'B':
+                return ARROW_DOWN;
+            case 'C':
+                return ARROW_RIGHT;
+            case 'D':
+                return ARROW_LEFT;
+            }
+        }
+        return '\x1b';
+    }
+
     return c;
 }
 
-void editor_process_keypress() {
-    char c = editor_read_keypress();
+void editor_move_cursor(int k) {
+    switch (k) {
+    case ARROW_LEFT:
+        if (e_config.cursor_x != 0) {
+            e_config.cursor_x--;
+        }
+        break;
+    case ARROW_RIGHT:
+        if (e_config.cursor_x != e_config.term_cols - 1) {
+            e_config.cursor_x++;
+        }
+        break;
+    case ARROW_DOWN:
+        if (e_config.cursor_y != e_config.term_rows - 1) {
+            e_config.cursor_y++;
+        }
+        break;
+    case ARROW_UP:
+        if (e_config.cursor_y != 0) {
+            e_config.cursor_y--;
+        }
+        break;
+    }
+}
 
-    switch (c) {
+void editor_process_keypress() {
+    int k = editor_read_keypress();
+
+    switch (k) {
     case CTRL_KEY('q'):
         esc_clear_screen();
         esc_cursor_home();
         exit(0);
         break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+        editor_move_cursor(k);
+        break;
     }
 }
 
 void init_editor() {
+    e_config.cursor_x = e_config.cursor_y = 0;
     if (get_term_size(&e_config.term_rows, &e_config.term_cols) == -1) {
         die("get_term_size");
     }
