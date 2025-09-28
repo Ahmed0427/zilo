@@ -19,7 +19,17 @@
 #define ESC_MOVE_BOTTOM_RIGHT "\x1b[999C\x1b[999B"
 #define ESC_CURSOR_POS_REQ "\x1b[6n"
 
-enum editorKey { ARROW_LEFT = 1000, ARROW_RIGHT, ARROW_UP, ARROW_DOWN };
+enum editor_key {
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
+    ARROW_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
+};
 
 void esc_cursor_home() {
     write(STDOUT_FILENO, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
@@ -169,15 +179,49 @@ int editor_read_keypress() {
             return c;
 
         if (seq[0] == '[') {
+            if (seq[1] >= '0' && seq[1] <= '9') {
+                if (read(STDIN_FILENO, &seq[2], 1) != 1)
+                    return c;
+                if (seq[2] == '~') {
+                    switch (seq[1]) {
+                    case '1':
+                        return HOME_KEY;
+                    case '3':
+                        return DEL_KEY;
+                    case '4':
+                        return END_KEY;
+                    case '5':
+                        return PAGE_UP;
+                    case '6':
+                        return PAGE_DOWN;
+                    case '7':
+                        return HOME_KEY;
+                    case '8':
+                        return END_KEY;
+                    }
+                }
+            } else {
+                switch (seq[1]) {
+                case 'A':
+                    return ARROW_UP;
+                case 'B':
+                    return ARROW_DOWN;
+                case 'C':
+                    return ARROW_RIGHT;
+                case 'D':
+                    return ARROW_LEFT;
+                case 'H':
+                    return HOME_KEY;
+                case 'F':
+                    return END_KEY;
+                }
+            }
+        } else if (seq[0] == 'O') {
             switch (seq[1]) {
-            case 'A':
-                return ARROW_UP;
-            case 'B':
-                return ARROW_DOWN;
-            case 'C':
-                return ARROW_RIGHT;
-            case 'D':
-                return ARROW_LEFT;
+            case 'H':
+                return HOME_KEY;
+            case 'F':
+                return END_KEY;
             }
         }
         return '\x1b';
@@ -219,6 +263,18 @@ void editor_process_keypress() {
         esc_clear_screen();
         esc_cursor_home();
         exit(0);
+        break;
+    case HOME_KEY:
+        e_config.cursor_x = 0;
+        break;
+    case END_KEY:
+        e_config.cursor_x = e_config.term_cols - 1;
+        break;
+    case PAGE_UP:
+    case PAGE_DOWN:
+        for (int i = 0; i < e_config.term_rows / 2; i++) {
+            editor_move_cursor(k == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+        }
         break;
     case ARROW_UP:
     case ARROW_DOWN:
