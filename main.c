@@ -150,16 +150,26 @@ void editor_scroll() {
   if (e_config.cursor_y >= e_config.row_off + e_config.term_rows) {
     e_config.row_off = e_config.cursor_y - e_config.term_rows + 1;
   }
+
+  if (e_config.col_off > e_config.cursor_x) {
+    e_config.col_off = e_config.cursor_x;
+  }
+
+  if (e_config.cursor_x >= e_config.col_off + e_config.term_cols) {
+    e_config.col_off = e_config.cursor_x - e_config.term_cols + 1;
+  }
 }
 
 void editor_draw_rows(abuf_t *ab) {
   for (int i = 0; i < e_config.term_rows; i++) {
     int r = i + e_config.row_off;
     if (r < e_config.rows_size) {
-      int len = e_config.rows[r].size;
+      int len = e_config.rows[r].size - e_config.col_off;
+      if (len < 0)
+        len = 0;
       if (len > e_config.term_cols)
         len = e_config.term_cols;
-      ab_append(ab, e_config.rows[r].chars, len);
+      ab_append(ab, &e_config.rows[r].chars[e_config.col_off], len);
     } else {
       ab_append(ab, "~", 1);
     }
@@ -180,7 +190,8 @@ void editor_reset_screen() {
   char buf[32] = {0};
 
   snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
-           e_config.cursor_y - e_config.row_off + 1, e_config.cursor_x + 1);
+           e_config.cursor_y - e_config.row_off + 1,
+           e_config.cursor_x - e_config.col_off + 1);
   ab_append(&ab, buf, strlen(buf));
 
   ab_append(&ab, ESC_CURSOR_SHOW, strlen(ESC_CURSOR_SHOW));
@@ -259,6 +270,10 @@ int editor_read_keypress() {
 }
 
 void editor_move_cursor(int k) {
+  editor_row_t *row = NULL;
+  if (e_config.cursor_y < e_config.rows_size) {
+    row = &e_config.rows[e_config.cursor_y];
+  }
   switch (k) {
   case ARROW_LEFT:
     if (e_config.cursor_x > 0) {
@@ -266,12 +281,12 @@ void editor_move_cursor(int k) {
     }
     break;
   case ARROW_RIGHT:
-    if (e_config.cursor_x < e_config.rows[e_config.cursor_y].size - 1) {
+    if (row && e_config.cursor_x < row->size - 1) {
       e_config.cursor_x++;
     }
     break;
   case ARROW_DOWN:
-    if (e_config.cursor_y < e_config.rows_size) {
+    if (e_config.cursor_y < e_config.rows_size - 1) {
       e_config.cursor_y++;
     }
     break;
