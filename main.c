@@ -348,13 +348,14 @@ void editor_move_cursor(int k) {
   case ARROW_RIGHT:
     if (row && e_config.cursor_x < row->rsize) {
       e_config.cursor_x++;
-    } else if (row && e_config.cursor_x == row->rsize) {
+    } else if (e_config.cursor_y < e_config.rows_size - 1 &&
+               e_config.cursor_x == row->rsize) {
       e_config.cursor_y++;
       e_config.cursor_x = 0;
     }
     break;
   case ARROW_DOWN:
-    if (e_config.cursor_y < e_config.rows_size) {
+    if (e_config.cursor_y < e_config.rows_size - 1) {
       e_config.cursor_y++;
     }
     break;
