@@ -1,10 +1,12 @@
 #include <ctype.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CTRL_KEY(c) (c & 0x1F)
@@ -57,15 +59,17 @@ typedef struct {
 
 typedef struct {
   int cursor_x;
-  int rcursor_x;
   int cursor_y;
   int term_rows;
   int term_cols;
   int row_off, col_off;
-  struct termios orig_term;
   int rows_size;
   int rows_cap;
   editor_row_t *rows;
+  struct termios orig_term;
+  char *filename;
+  char status_msg[128];
+  time_t status_msg_time;
 } editor_config_t;
 
 editor_config_t e_config;
@@ -149,26 +153,7 @@ int get_term_size(int *rows, int *cols) {
   return 0;
 }
 
-int editor_row_cx_to_rx(editor_row_t *row, int cx) {
-  int rx = 0;
-  int j;
-  for (j = 0; j < cx; j++) {
-    if (row->chars[j] == '\t')
-      rx += (ZILO_TAB_STOP - 1) - (rx % ZILO_TAB_STOP);
-    rx++;
-  }
-  return rx;
-}
-
 void editor_scroll() {
-  e_config.rcursor_x = 0;
-  if (e_config.cursor_y < e_config.rows_size) {
-    e_config.rcursor_x = editor_row_cx_to_rx(&e_config.rows[e_config.cursor_y],
-                                             e_config.cursor_x);
-  }
-
-  e_config.rcursor_x = e_config.cursor_x;
-
   if (e_config.row_off > e_config.cursor_y) {
     e_config.row_off = e_config.cursor_y;
   }
@@ -177,12 +162,12 @@ void editor_scroll() {
     e_config.row_off = e_config.cursor_y - e_config.term_rows + 1;
   }
 
-  if (e_config.col_off > e_config.rcursor_x) {
-    e_config.col_off = e_config.rcursor_x;
+  if (e_config.col_off > e_config.cursor_x) {
+    e_config.col_off = e_config.cursor_x;
   }
 
-  if (e_config.rcursor_x >= e_config.col_off + e_config.term_cols) {
-    e_config.col_off = e_config.rcursor_x - e_config.term_cols + 1;
+  if (e_config.cursor_x >= e_config.col_off + e_config.term_cols) {
+    e_config.col_off = e_config.cursor_x - e_config.term_cols + 1;
   }
 }
 
@@ -200,10 +185,57 @@ void editor_draw_rows(abuf_t *ab) {
       ab_append(ab, "~", 1);
     }
     ab_append(ab, ESC_CLEAR_LINE, strlen(ESC_CLEAR_LINE));
-    if (i < e_config.term_rows - 1) {
-      ab_append(ab, "\r\n", 2);
+    ab_append(ab, "\r\n", 2);
+  }
+}
+
+void editor_draw_status_bar(abuf_t *ab) {
+  ab_append(ab, "\x1b[7m", 4);
+
+  char status[80] = {0};
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines",
+                     e_config.filename ? e_config.filename : "[No Name]",
+                     e_config.rows_size);
+
+  char rstatus[80] = {0};
+  int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d", e_config.cursor_y + 1,
+                      e_config.rows_size);
+
+  if (len > e_config.term_cols) {
+    len = e_config.term_cols;
+    return;
+  }
+
+  ab_append(ab, status, len);
+  while (len < e_config.term_cols) {
+    if (e_config.term_cols - len == rlen) {
+      ab_append(ab, rstatus, rlen);
+      break;
+    } else {
+      ab_append(ab, " ", 1);
+      len++;
     }
   }
+
+  ab_append(ab, "\x1b[m", 3);
+  ab_append(ab, "\r\n", 2);
+}
+
+void editor_draw_message_bar(abuf_t *ab) {
+  ab_append(ab, ESC_CLEAR_LINE, strlen(ESC_CLEAR_LINE));
+  int msg_len = strlen(e_config.status_msg);
+  if (msg_len > e_config.term_cols)
+    msg_len = e_config.term_cols;
+  if (msg_len && time(NULL) - e_config.status_msg_time < 5)
+    ab_append(ab, e_config.status_msg, msg_len);
+}
+
+void editor_set_status_message(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(e_config.status_msg, sizeof(e_config.status_msg), fmt, ap);
+  va_end(ap);
+  e_config.status_msg_time = time(NULL);
 }
 
 void editor_reset_screen() {
@@ -211,13 +243,17 @@ void editor_reset_screen() {
   abuf_t ab = ABUF_INIT;
   ab_append(&ab, ESC_CURSOR_HOME, strlen(ESC_CURSOR_HOME));
   ab_append(&ab, ESC_CURSOR_HIDE, strlen(ESC_CURSOR_HIDE));
+
   editor_draw_rows(&ab);
+  editor_draw_status_bar(&ab);
+  editor_draw_message_bar(&ab);
 
   char buf[32] = {0};
 
   snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
            e_config.cursor_y - e_config.row_off + 1,
-           e_config.rcursor_x - e_config.col_off + 1);
+           e_config.cursor_x - e_config.col_off + 1);
+
   ab_append(&ab, buf, strlen(buf));
 
   ab_append(&ab, ESC_CURSOR_SHOW, strlen(ESC_CURSOR_SHOW));
@@ -374,16 +410,19 @@ void editor_process_keypress() {
 
 void init_editor() {
   e_config.cursor_x = 0;
-  e_config.rcursor_x = 0;
   e_config.cursor_y = 0;
   e_config.row_off = 0;
   e_config.col_off = 0;
   e_config.rows_size = 0;
   e_config.rows_cap = 8;
+  e_config.filename = NULL;
+  e_config.status_msg[0] = '\0';
+  e_config.status_msg_time = 0;
   e_config.rows = calloc(e_config.rows_cap, sizeof(editor_row_t));
   if (get_term_size(&e_config.term_rows, &e_config.term_cols) == -1) {
     die("get_term_size");
   }
+  e_config.term_rows -= 2;
 }
 
 void editor_update_row(editor_row_t *row) {
@@ -440,6 +479,9 @@ void editor_open(char *filename) {
     die("fopen");
   }
 
+  free(e_config.filename);
+  e_config.filename = strdup(filename);
+
   char *line = NULL;
   size_t size = 0;
   ssize_t nread;
@@ -462,6 +504,8 @@ int main(int argc, char **argv) {
   if (argc >= 2) {
     editor_open(argv[1]);
   }
+
+  editor_set_status_message("HELP: Ctrl-Q = quit");
 
   while (1) {
     editor_reset_screen();
