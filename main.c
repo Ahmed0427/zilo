@@ -11,6 +11,8 @@
 
 #define ABUF_INIT {NULL, 0}
 
+#define ZILO_TAB_STOP 8
+
 #define ESC_CLEAR_LINE "\x1b[K"
 #define ESC_CURSOR_HIDE "\x1b[?25l"
 #define ESC_CURSOR_SHOW "\x1b[?25h"
@@ -49,11 +51,16 @@ void die(const char *s) {
 typedef struct {
   char *chars;
   int size;
+  char *rchars;
+  int rsize;
 } editor_row_t;
 
 typedef struct {
-  int cursor_x, cursor_y;
-  int term_rows, term_cols;
+  int cursor_x;
+  int rcursor_x;
+  int cursor_y;
+  int term_rows;
+  int term_cols;
   int row_off, col_off;
   struct termios orig_term;
   int rows_size;
@@ -142,7 +149,26 @@ int get_term_size(int *rows, int *cols) {
   return 0;
 }
 
+int editor_row_cx_to_rx(editor_row_t *row, int cx) {
+  int rx = 0;
+  int j;
+  for (j = 0; j < cx; j++) {
+    if (row->chars[j] == '\t')
+      rx += (ZILO_TAB_STOP - 1) - (rx % ZILO_TAB_STOP);
+    rx++;
+  }
+  return rx;
+}
+
 void editor_scroll() {
+  e_config.rcursor_x = 0;
+  if (e_config.cursor_y < e_config.rows_size) {
+    e_config.rcursor_x = editor_row_cx_to_rx(&e_config.rows[e_config.cursor_y],
+                                             e_config.cursor_x);
+  }
+
+  e_config.rcursor_x = e_config.cursor_x;
+
   if (e_config.row_off > e_config.cursor_y) {
     e_config.row_off = e_config.cursor_y;
   }
@@ -151,12 +177,12 @@ void editor_scroll() {
     e_config.row_off = e_config.cursor_y - e_config.term_rows + 1;
   }
 
-  if (e_config.col_off > e_config.cursor_x) {
-    e_config.col_off = e_config.cursor_x;
+  if (e_config.col_off > e_config.rcursor_x) {
+    e_config.col_off = e_config.rcursor_x;
   }
 
-  if (e_config.cursor_x >= e_config.col_off + e_config.term_cols) {
-    e_config.col_off = e_config.cursor_x - e_config.term_cols + 1;
+  if (e_config.rcursor_x >= e_config.col_off + e_config.term_cols) {
+    e_config.col_off = e_config.rcursor_x - e_config.term_cols + 1;
   }
 }
 
@@ -164,12 +190,12 @@ void editor_draw_rows(abuf_t *ab) {
   for (int i = 0; i < e_config.term_rows; i++) {
     int r = i + e_config.row_off;
     if (r < e_config.rows_size) {
-      int len = e_config.rows[r].size - e_config.col_off;
+      int len = e_config.rows[r].rsize - e_config.col_off;
       if (len < 0)
         len = 0;
       if (len > e_config.term_cols)
         len = e_config.term_cols;
-      ab_append(ab, &e_config.rows[r].chars[e_config.col_off], len);
+      ab_append(ab, &e_config.rows[r].rchars[e_config.col_off], len);
     } else {
       ab_append(ab, "~", 1);
     }
@@ -191,7 +217,7 @@ void editor_reset_screen() {
 
   snprintf(buf, sizeof(buf), "\x1b[%d;%dH",
            e_config.cursor_y - e_config.row_off + 1,
-           e_config.cursor_x - e_config.col_off + 1);
+           e_config.rcursor_x - e_config.col_off + 1);
   ab_append(&ab, buf, strlen(buf));
 
   ab_append(&ab, ESC_CURSOR_SHOW, strlen(ESC_CURSOR_SHOW));
@@ -276,17 +302,23 @@ void editor_move_cursor(int k) {
   }
   switch (k) {
   case ARROW_LEFT:
-    if (e_config.cursor_x > 0) {
+    if (e_config.cursor_x != 0) {
       e_config.cursor_x--;
+    } else if (e_config.cursor_y > 0) {
+      e_config.cursor_y--;
+      e_config.cursor_x = e_config.rows[e_config.cursor_y].rsize;
     }
     break;
   case ARROW_RIGHT:
-    if (row && e_config.cursor_x < row->size - 1) {
+    if (row && e_config.cursor_x < row->rsize) {
       e_config.cursor_x++;
+    } else if (row && e_config.cursor_x == row->rsize) {
+      e_config.cursor_y++;
+      e_config.cursor_x = 0;
     }
     break;
   case ARROW_DOWN:
-    if (e_config.cursor_y < e_config.rows_size - 1) {
+    if (e_config.cursor_y < e_config.rows_size) {
       e_config.cursor_y++;
     }
     break;
@@ -295,6 +327,13 @@ void editor_move_cursor(int k) {
       e_config.cursor_y--;
     }
     break;
+  }
+  if (e_config.cursor_y < e_config.rows_size) {
+    row = &e_config.rows[e_config.cursor_y];
+  }
+  int row_size = (row) ? row->rsize : 0;
+  if (e_config.cursor_x >= row_size) {
+    e_config.cursor_x = row_size;
   }
 }
 
@@ -311,14 +350,19 @@ void editor_process_keypress() {
     e_config.cursor_x = 0;
     break;
   case END_KEY:
-    e_config.cursor_x = e_config.term_cols - 1;
+    int row_size = 0;
+    if (e_config.cursor_y < e_config.rows_size) {
+      row_size = e_config.rows[e_config.cursor_y].rsize;
+    }
+    e_config.cursor_x = row_size;
     break;
   case PAGE_UP:
-  case PAGE_DOWN:
+  case PAGE_DOWN: {
     for (int i = 0; i < e_config.term_rows / 2; i++) {
       editor_move_cursor(k == PAGE_UP ? ARROW_UP : ARROW_DOWN);
     }
     break;
+  }
   case ARROW_UP:
   case ARROW_DOWN:
   case ARROW_LEFT:
@@ -330,6 +374,7 @@ void editor_process_keypress() {
 
 void init_editor() {
   e_config.cursor_x = 0;
+  e_config.rcursor_x = 0;
   e_config.cursor_y = 0;
   e_config.row_off = 0;
   e_config.col_off = 0;
@@ -339,6 +384,32 @@ void init_editor() {
   if (get_term_size(&e_config.term_rows, &e_config.term_cols) == -1) {
     die("get_term_size");
   }
+}
+
+void editor_update_row(editor_row_t *row) {
+  free(row->rchars);
+
+  int j;
+  int tabs = 0;
+  for (j = 0; j < row->size; j++)
+    if (row->chars[j] == '\t')
+      tabs++;
+
+  row->rchars = malloc(row->size + tabs * (ZILO_TAB_STOP - 1) + 1);
+
+  int idx = 0;
+  for (j = 0; j < row->size; j++) {
+    if (row->chars[j] == '\t') {
+      row->rchars[idx++] = ' ';
+      while (idx % 8 != 0)
+        row->rchars[idx++] = ' ';
+    } else {
+      row->rchars[idx++] = row->chars[j];
+    }
+  }
+
+  row->rchars[idx] = '\0';
+  row->rsize = idx;
 }
 
 void editor_append_row(char *s, size_t len) {
@@ -355,6 +426,11 @@ void editor_append_row(char *s, size_t len) {
   e_config.rows[at].chars = malloc(len + 1);
   memcpy(e_config.rows[at].chars, s, len);
   e_config.rows[at].chars[len] = '\0';
+
+  e_config.rows[at].rsize = 0;
+  e_config.rows[at].rchars = NULL;
+  editor_update_row(&e_config.rows[at]);
+
   e_config.rows_size++;
 }
 
